@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Admin — Silver Drop ERP</title>
+<link rel="stylesheet" href="css.css">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="js/config.js"></script>
+<script src="js/app.js"></script>
+</head>
+<body><main>
+<header><h1><a href="index.html">Silver Drop ERP</a> · Admin</h1><button class="secondary" onclick="logout()">Log out</button></header>
+<div id="msg" class="msg"></div>
+
+<section class="card">
+  <h2>Users</h2>
+  <p class="muted">Add new logins in Supabase → Authentication → Users, then give them a role here.</p>
+  <div class="tablewrap"><table id="users"><thead><tr><th>Email</th><th>Roles</th></tr></thead><tbody></tbody></table></div>
+</section>
+
+<section class="card">
+  <h2>Assign or remove a role</h2>
+  <div class="row">
+    <div><label>Email</label><input id="aEmail" type="email"></div>
+    <div><label>Role</label><select id="aRole" class="roleSelect"></select></div>
+    <div><label>Department</label><input id="aDept" placeholder="store, production, finance…"></div>
+    <div><button onclick="assignRole()">Assign</button> <button class="secondary" onclick="revokeRole()">Remove</button></div>
+  </div>
+</section>
+
+<section class="card">
+  <h2>Permissions</h2>
+  <div class="row">
+    <div><label>Role</label><select id="pRole" class="roleSelect" onchange="loadPerms()"></select></div>
+  </div>
+  <div class="tablewrap" style="margin-top:12px"><table id="perms"><thead><tr><th>Table</th><th>Read</th><th>Add</th><th>Edit</th><th>Delete</th><th>Scope</th><th></th></tr></thead><tbody></tbody></table></div>
+</section>
+
+<section class="card">
+  <h2>Register import gates</h2>
+  <div class="tablewrap"><table id="gates"><thead><tr><th>Gate</th><th>On</th><th>Threshold</th><th>Threshold 2</th><th>Meaning</th><th></th></tr></thead><tbody></tbody></table></div>
+</section>
+
+<section class="card">
+  <h2>New role</h2>
+  <div class="row">
+    <div><label>Name (lowercase, e.g. auditor)</label><input id="nName"></div>
+    <div><label>Description</label><input id="nDesc"></div>
+    <div><button onclick="createRole()">Create</button></div>
+  </div>
+</section>
+
+<script>
+let ROLES = [], TABLES = [];
+
+async function call(fn, args) {
+  const { data, error } = await sb.rpc(fn, args);
+  if (error) { showMsg(error.message, true); throw error; }
+  return data;
+}
+
+async function init() {
+  await requireLogin();
+  const a = await myAccess();
+  if (!a.is_owner) { document.querySelector('main').innerHTML = '<p>Owners only. <a href="index.html">Back</a></p>'; return; }
+  const r = await sb.from('role').select('id,name').order('name');
+  ROLES = r.data || [];
+  TABLES = await call('admin_list_tables');
+  document.querySelectorAll('.roleSelect').forEach(s =>
+    s.innerHTML = ROLES.map(x => `<option>${esc(x.name)}</option>`).join(''));
+  $('#pRole').value = ROLES.find(x => x.name !== 'owner')?.name || '';
+  await Promise.all([loadUsers(), loadPerms(), loadGates()]);
+}
+
+async function loadUsers() {
+  const users = await call('admin_list_users');
+  $('#users tbody').innerHTML = users.map(u =>
+    `<tr><td>${esc(u.email)}</td><td>${u.roles.map(r => esc(r.role) + (r.department ? ' (' + esc(r.department) + ')' : '')).join(', ') || '<span class="muted">none</span>'}</td></tr>`).join('');
+}
+
+async function loadPerms() {
+  const role = ROLES.find(x => x.name === $('#pRole').value);
+  if (!role) return;
+  if (role.name === 'owner') { $('#perms tbody').innerHTML = '<tr><td colspan="7">Owner always has full access.</td></tr>'; return; }
+  const { data } = await sb.from('role_permission').select('*').eq('role_id', role.id);
+  const byTable = Object.fromEntries((data || []).map(p => [p.table_name, p]));
+  const cb = (t, k, v) => `<input type="checkbox" data-t="${esc(t)}" data-k="${k}" ${v ? 'checked' : ''} style="width:auto">`;
+  $('#perms tbody').innerHTML = TABLES.map(t => {
+    const p = byTable[t] || {};
+    return `<tr><td>${esc(t)}</td><td>${cb(t,'read',p.can_read)}</td><td>${cb(t,'insert',p.can_insert)}</td><td>${cb(t,'update',p.can_update)}</td><td>${cb(t,'delete',p.can_delete)}</td>
+      <td><select data-t="${esc(t)}" data-k="scope">${['own','department','all'].map(s => `<option ${p.scope === s ? 'selected' : ''}>${s}</option>`).join('')}</select></td>
+      <td><button class="secondary" onclick="savePerm('${esc(t)}')">Save</button></td></tr>`;
+  }).join('');
+}
+
+async function savePerm(t) {
+  const get = k => document.querySelector(`[data-t="${t}"][data-k="${k}"]`);
+  await call('admin_set_permission', {
+    p_role: $('#pRole').value, p_table: t,
+    p_read: get('read').checked, p_insert: get('insert').checked,
+    p_update: get('update').checked, p_delete: get('delete').checked,
+    p_scope: get('scope').value
+  });
+  showMsg(`Saved ${t} for ${$('#pRole').value}`);
+}
+
+async function loadGates() {
+  const { data } = await sb.from('register_gate_config').select('*').order('sort_order');
+  $('#gates tbody').innerHTML = (data || []).map(g => `<tr><td>${esc(g.gate_name)}</td>
+    <td><input type="checkbox" id="ge_${g.gate_name}" ${g.enabled ? 'checked' : ''} style="width:auto"></td>
+    <td><input type="number" step="any" id="g1_${g.gate_name}" value="${g.threshold ?? ''}"></td>
+    <td><input type="number" step="any" id="g2_${g.gate_name}" value="${g.threshold_2 ?? ''}"></td>
+    <td class="muted">${esc(g.description)}</td>
+    <td><button class="secondary" onclick="saveGate('${g.gate_name}')">Save</button></td></tr>`).join('');
+}
+async function saveGate(n) {
+  const v = id => $('#' + id).value === '' ? null : Number($('#' + id).value);
+  const { error } = await sb.from('register_gate_config').update({
+    enabled: $('#ge_' + n).checked, threshold: v('g1_' + n), threshold_2: v('g2_' + n) }).eq('gate_name', n);
+  if (error) return showMsg(error.message, true);
+  showMsg('Saved gate ' + n);
+}
+
+async function assignRole() {
+  await call('admin_assign_role', { p_email: $('#aEmail').value, p_role: $('#aRole').value, p_department: $('#aDept').value || null });
+  showMsg('Role assigned'); loadUsers();
+}
+async function revokeRole() {
+  await call('admin_revoke_role', { p_email: $('#aEmail').value, p_role: $('#aRole').value });
+  showMsg('Role removed'); loadUsers();
+}
+async function createRole() {
+  await call('admin_create_role', { p_name: $('#nName').value.trim(), p_description: $('#nDesc').value });
+  showMsg('Role created'); init();
+}
+init().catch(e => showMsg(e.message, true));
+</script>
+</main></body></html>

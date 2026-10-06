@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Costing — Silver Drop ERP</title>
+<link rel="stylesheet" href="css.css">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="js/config.js"></script>
+<script src="js/app.js"></script>
+</head>
+<body><main>
+<header><h1><a href="index.html">Silver Drop ERP</a> · Recipe Costing</h1><button class="secondary" onclick="logout()">Log out</button></header>
+<div id="msg" class="msg"></div>
+<section class="card">
+  <div class="row"><div><label>Cost as on</label><input id="cdate" type="date" onchange="load()"></div></div>
+  <p class="muted">Rate = 30-day average of posted inward register lines; if none, the latest manual rate below.</p>
+</section>
+<div id="recipes"></div>
+<section class="card">
+  <h2>Add / change a manual rate</h2>
+  <div class="row">
+    <div><label>Material</label><select id="rMat"></select></div>
+    <div><label>Rate (₹ per master unit)</label><input id="rRate" type="number" step="any"></div>
+    <div><label>Effective from</label><input id="rFrom" type="date"></div>
+    <div><label>Source</label><input id="rSrc"></div>
+    <div><button onclick="saveRate()">Save rate</button></div>
+  </div>
+</section>
+<script>
+const today = () => new Date(Date.now() + 5.5*3600e3).toISOString().slice(0,10);
+const inr = v => v == null ? '—' : '₹' + Number(v).toLocaleString('en-IN', { maximumFractionDigits: 2 });
+async function load() {
+  await requireLogin();
+  const { data, error } = await sb.rpc('all_recipe_costs', { p_date: $('#cdate').value });
+  if (error) return showMsg(error.message, true);
+  $('#recipes').innerHTML = data.map(r => `<section class="card">
+    <h2>${esc(r.name)} <span class="muted">${esc(r.version)} · ${esc(r.status)}</span></h2>
+    <p><b>Batch: ${inr(r.batch_cost)}</b> · Output ${r.output_qty ?? '—'} ${esc(r.output_unit || '')} · <b>${inr(r.cost_per_output_unit)} / ${esc(r.output_unit || 'unit')}</b>
+      ${r.complete ? '<span class="good"> ✓ confirmed</span>' : ''}</p>
+    ${r.warnings.map(w => `<p class="msg error">⚠ ${esc(w)}</p>`).join('')}
+    <div class="tablewrap"><table><thead><tr><th>Material</th><th>Qty</th><th>Rate</th><th>Rate source</th><th>Cost</th></tr></thead><tbody>
+    ${r.lines.map(l => `<tr><td>${esc(l.material)}</td><td>${l.qty} ${esc(l.unit)}</td><td>${l.rate == null ? '—' : inr(l.rate) + '/' + esc(l.master_unit)}</td>
+      <td class="muted">${esc(l.rate_source || '')}</td><td class="${l.problem ? 'bad' : ''}">${l.problem ? esc(l.problem) : inr(l.cost)}</td></tr>`).join('')}
+    </tbody></table></div></section>`).join('') || '<p class="muted">No recipes.</p>';
+}
+async function saveRate() {
+  const { error } = await sb.from('material_rate').upsert({
+    material_id: Number($('#rMat').value), rate: Number($('#rRate').value),
+    effective_from: $('#rFrom').value, source: $('#rSrc').value || null }, { onConflict: 'material_id,effective_from' });
+  if (error) return showMsg(error.message, true);
+  showMsg('Rate saved'); load();
+}
+(async () => {
+  $('#cdate').value = today(); $('#rFrom').value = today();
+  const { data: mats } = await sb.from('material').select('id,code,name,unit').order('name');
+  $('#rMat').innerHTML = (mats || []).map(m => `<option value="${m.id}">${esc(m.name)} (${esc(m.unit)})</option>`).join('');
+  load();
+})();
+</script>
+</main></body></html>

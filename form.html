@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Daily Form — Silver Drop ERP</title>
+<link rel="stylesheet" href="css.css">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="js/config.js"></script>
+<script src="js/app.js"></script>
+</head>
+<body><main>
+<header><h1><a href="index.html">Silver Drop ERP</a> · <span id="title">Form</span></h1><button class="secondary" onclick="logout()">Log out</button></header>
+<section class="card">
+  <div class="row">
+    <div><label>Business date</label><input id="bdate" type="date" onchange="load()"></div>
+    <div><label>Your name</label><input id="who"></div>
+  </div>
+  <p id="state" class="muted"></p>
+</section>
+<section class="card">
+  <p class="muted">Balance: opening + production − issue − M.issue − used − closing = 0. If not, choose an explanation.</p>
+  <div class="tablewrap"><table id="lines"><thead><tr>
+    <th>Item</th><th>Opening</th><th>Production</th><th>Issue</th><th>M.issue</th><th>Used</th>
+    <th>Closing</th><th>Closing 2</th><th>Diff</th><th>Explanation</th><th>Note</th></tr></thead><tbody></tbody></table></div>
+  <p><button id="submitBtn" onclick="submitForm()">Submit</button></p>
+  <div id="msg" class="msg"></div>
+  <ul id="errors" class="msg error"></ul>
+</section>
+<script>
+const TYPE = new URLSearchParams(location.search).get('type');
+let LINES = [];
+const today = () => new Date(Date.now() + 5.5*3600e3).toISOString().slice(0,10); // IST
+const num = v => v === '' || v == null ? null : Number(v);
+
+async function load() {
+  await requireLogin();
+  $('#errors').innerHTML = ''; showMsg('');
+  let t;
+  try { t = (await sb.rpc('form_template', { p_form_type: TYPE, p_date: $('#bdate').value })); }
+  catch (e) { return showMsg(e.message, true); }
+  if (t.error) return showMsg(t.error.message, true);
+  t = t.data;
+  $('#title').textContent = t.form.label;
+  LINES = t.lines;
+  const locked = t.day_closed || (t.existing && t.existing.status !== 'draft');
+  $('#state').textContent = t.day_closed ? 'Day is closed.' :
+    t.existing && t.existing.status !== 'draft' ? `Already submitted by ${t.existing.submitted_by || '—'} — read only. Ask the owner to return it if it needs changes.` : '';
+  $('#submitBtn').disabled = locked;
+  let group = null;
+  $('#lines tbody').innerHTML = LINES.map((l, i) => {
+    const g = l.form_line !== group ? `<tr class="grouprow"><td colspan="11">${esc(l.form_line || '')}</td></tr>` : '';
+    group = l.form_line;
+    const inp = (k, v='') => `<input type="number" step="any" inputmode="decimal" data-i="${i}" data-k="${k}" value="${v ?? ''}" oninput="calc(${i})">`;
+    const states = (l.two_state_fields || '/').split('/');
+    return g + `<tr><td>${esc(l.name)}<br><span class="muted">${esc(l.unit)}</span></td>
+      <td>${inp('opening_carried', l.opening)}</td><td>${inp('production')}</td><td>${inp('issue')}</td>
+      <td>${inp('m_issue')}</td><td>${inp('used')}</td>
+      <td>${inp('closing_a')}${l.two_state ? `<span class="muted">${esc(states[0])}</span>` : ''}</td>
+      <td>${l.two_state ? inp('closing_b') + `<span class="muted">${esc(states[1] || '')}</span>` : ''}</td>
+      <td id="d${i}"></td>
+      <td><select data-i="${i}" data-k="explanation_type"><option value=""></option><option>recount</option><option>wastage</option><option>transfer</option></select></td>
+      <td><input data-i="${i}" data-k="explanation_text"></td></tr>`;
+  }).join('');
+  LINES.forEach((_, i) => calc(i));
+}
+
+function val(i, k) { const el = document.querySelector(`[data-i="${i}"][data-k="${k}"]`); return el ? el.value : null; }
+function calc(i) {
+  const n = k => Number(val(i,k) || 0);
+  const d = n('opening_carried') + n('production') - n('issue') - n('m_issue') - n('used') - n('closing_a') - n('closing_b');
+  const el = $('#d' + i);
+  el.textContent = Math.abs(d) < 0.01 ? '✓' : (d > 0 ? d.toFixed(3) + ' missing' : (-d).toFixed(3) + ' extra');
+  el.className = Math.abs(d) < 0.01 ? 'good' : 'bad';
+}
+
+async function submitForm() {
+  $('#errors').innerHTML = '';
+  const lines = LINES.map((l, i) => ({
+    line_number: i + 1, product_code: l.product_code,
+    opening_carried: num(val(i,'opening_carried')), production: num(val(i,'production')),
+    issue: num(val(i,'issue')), m_issue: num(val(i,'m_issue')), used: num(val(i,'used')),
+    closing_a: num(val(i,'closing_a')), closing_b: l.two_state ? num(val(i,'closing_b')) : null,
+    explanation_type: val(i,'explanation_type') || null, explanation_text: val(i,'explanation_text') || null
+  }));
+  const { data, error } = await sb.rpc('submit_form', {
+    p_business_date: $('#bdate').value, p_form_type: TYPE, p_lines: lines,
+    p_submitted_by: $('#who').value || null, p_device: navigator.userAgent.slice(0, 100) });
+  if (error) return showMsg(error.message, true);
+  if (data.status === 'rejected') {
+    showMsg('Not saved — fix these:', true);
+    $('#errors').innerHTML = data.errors.map(e => `<li>Line ${e.line}: ${esc(e.error)}</li>`).join('');
+    return;
+  }
+  showMsg('Submitted ✓'); load();
+}
+$('#bdate').value = today();
+load();
+</script>
+</main></body></html>

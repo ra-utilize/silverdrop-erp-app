@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Register Import — Silver Drop ERP</title>
+<link rel="stylesheet" href="css.css">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+<script src="js/ace.js"></script>
+<script src="js/config.js"></script>
+<script src="js/app.js"></script>
+</head>
+<body><main>
+<header><h1><a href="index.html">Silver Drop ERP</a> · Register Import</h1><button class="secondary" onclick="logout()">Log out</button></header>
+<div id="msg" class="msg"></div>
+
+<section class="card" id="uploadCard">
+  <h2>Upload ACE register</h2>
+  <p class="muted">Export from ACE one day at a time: <b>Inward Register Location Wise</b> and <b>Outward Register Location + Product Group Wise</b> (.xls as ACE saves it). Upload each file separately.</p>
+  <div class="row">
+    <div><label>Your name</label><input id="who"></div>
+    <div><label><input type="checkbox" id="replace" style="width:auto"> Replace this day's earlier import</label></div>
+  </div>
+  <label>File</label><input id="file" type="file" accept=".xls,.xlsx,.csv">
+  <div id="generic" class="hidden">
+    <p class="muted">Not an ACE report — reading as a plain table. Needed columns: Voucher No, Voucher Date, Material Code, Party Code, Qty, Unit, Rate, Value.</p>
+    <div class="row">
+      <div><label>Business date</label><input id="bdate" type="date"></div>
+      <div><label>Register</label><select id="rtype"><option value="inward">Inward</option><option value="outward">Outward</option></select></div>
+    </div>
+  </div>
+  <div id="preview"></div>
+  <p><button id="importBtn" onclick="doImport()" disabled>Import</button></p>
+  <ul id="result" class="msg"></ul>
+</section>
+
+<section class="card" id="linkCard">
+  <h2>ACE items to link</h2>
+  <p class="muted">ACE sends item names, not codes. Link each name once to a material (or create it). Waiting lines are released automatically.</p>
+  <div class="tablewrap"><table id="links"><thead><tr><th>ACE name</th><th>Lines</th><th>Link to material</th><th>…or new, unit</th><th></th></tr></thead><tbody></tbody></table></div>
+</section>
+
+<section class="card" id="holdsCard">
+  <h2>Lines on hold</h2>
+  <p class="muted">Held lines are kept out of stock and costing. Accept = line is correct. Reject = keep it out for good (fix in ACE and re-upload).</p>
+  <div class="tablewrap"><table id="holds"><thead><tr><th>Date / file</th><th>Line</th><th>Material</th><th>Qty × Rate = Value</th><th>Gate</th><th>Reason</th><th></th></tr></thead><tbody></tbody></table></div>
+</section>
+
+<script>
+const today = () => new Date(Date.now() + 5.5*3600e3).toISOString().slice(0,10);
+const FIELDS = {
+  voucher_no:    ['voucher no','voucher_no','vch no','voucher number','bill no','voucher'],
+  voucher_date:  ['voucher date','voucher_date','vch date','bill date','date'],
+  material_code: ['material code','material_code','item code','item_code','code'],
+  party_code:    ['party code','party_code','supplier code','party'],
+  qty:           ['qty','quantity'],
+  unit:          ['unit','uom'],
+  rate:          ['rate','price'],
+  value:         ['value','amount'],
+  location:      ['location','godown'],
+  notes:         ['notes','narration','remarks']
+};
+const REQUIRED = ['voucher_no','voucher_date','material_code','party_code','qty','rate','value'];
+let ROWS = [], FILE = null, HASH = null;
+const norm = s => String(s ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+let ACE = null, MATS = [];
+$('#file').addEventListener('change', async (ev) => {
+  FILE = ev.target.files[0]; ROWS = []; ACE = null; $('#importBtn').disabled = true; $('#result').innerHTML = ''; showMsg('');
+  $('#generic').classList.add('hidden'); $('#preview').innerHTML = '';
+  if (!FILE) return;
+  if (!window.XLSX) return showMsg('Excel reader did not load — check internet connection.', true);
+  const buf = await FILE.arrayBuffer();
+  try { HASH = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', buf))).map(b => b.toString(16).padStart(2,'0')).join(''); }
+  catch { HASH = null; }
+  const wb = XLSX.read(buf);
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const grid = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: null });
+  const p = parseAce(grid);
+  if (p.kind) {
+    ACE = p;
+    const label = p.kind === 'ace_inward' ? 'Inward register' : 'Outward register (sales summary)';
+    const docs = p.kind === 'ace_inward' ? Object.entries(p.rows.reduce((a, r) => (a[r.doc_type] = (a[r.doc_type] || 0) + 1, a), {})).map(([k, v]) => `${k}: ${v}`).join(', ') : '';
+    $('#preview').innerHTML = `<p><b>${label}</b> · ${esc(p.from)}${p.to !== p.from ? ' to ' + esc(p.to) : ''} · ${p.rows.length} lines ${docs ? '(' + docs + ')' : ''} · lines total ₹${p.sum.toLocaleString('en-IN')} / report ₹${(p.total ?? 0).toLocaleString('en-IN')}</p>`
+      + (p.problems.length ? `<p class="msg error">${p.problems.map(esc).join('<br>')}</p>` : '<p class="good">File read correctly ✓</p>');
+    $('#importBtn').disabled = p.problems.length > 0;
+    return;
+  }
+  // generic table
+  $('#generic').classList.remove('hidden');
+  const raw = XLSX.utils.sheet_to_json(ws, { raw: true, defval: null });
+  if (!raw.length) return showMsg('No rows found in the first sheet.', true);
+  const headers = Object.keys(raw[0]);
+  const map = {};
+  for (const [f, names] of Object.entries(FIELDS)) { const h = headers.find(h => names.includes(norm(h))); if (h) map[f] = h; }
+  const missing = REQUIRED.filter(f => !map[f]);
+  ROWS = raw.map((r, i) => {
+    const o = { line_number: i + 1 };
+    for (const [f, h] of Object.entries(map)) {
+      let v = r[h];
+      if (f === 'voucher_date' && typeof v === 'number') { const d = XLSX.SSF.parse_date_code(v); v = `${d.y}-${String(d.m).padStart(2,'0')}-${String(d.d).padStart(2,'0')}`; }
+      o[f] = v === null ? null : String(v);
+    }
+    return o;
+  }).filter(o => Object.entries(o).some(([k, v]) => k !== 'line_number' && v));
+  $('#preview').innerHTML = `<p>${ROWS.length} rows read. Columns found: ${Object.entries(map).map(([f,h]) => `${esc(f)} ← "${esc(h)}"`).join(', ')}</p>`
+    + (missing.length ? `<p class="msg error">Missing columns: ${missing.join(', ')}.</p>` : '');
+  $('#importBtn').disabled = ROWS.length === 0;
+});
+
+async function doImport() {
+  $('#importBtn').disabled = true;
+  let data, error;
+  if (ACE) {
+    const fn = ACE.kind === 'ace_inward' ? 'import_ace_inward' : 'import_ace_outward';
+    ({ data, error } = await sb.rpc(fn, { p_rows: ACE.rows, p_report_from: ACE.from, p_report_to: ACE.to,
+      p_report_total: ACE.total, p_file_name: FILE.name, p_file_hash: HASH,
+      p_uploaded_by: $('#who').value || null, p_replace: $('#replace').checked }));
+  } else {
+    ({ data, error } = await sb.rpc('import_register', {
+      p_business_date: $('#bdate').value, p_register_type: $('#rtype').value, p_rows: ROWS,
+      p_file_name: FILE.name, p_file_hash: HASH, p_uploaded_by: $('#who').value || null, p_department: 'accounts' }));
+  }
+  if (error) { $('#importBtn').disabled = false; return showMsg(error.message, true); }
+  if (data.status === 'refused') { $('#importBtn').disabled = false; return showMsg(data.reason, true); }
+  if (data.sales_value !== undefined) {
+    showMsg(`Sales for ${data.business_date}: ${data.lines} products, ₹${Number(data.sales_value).toLocaleString('en-IN')}. ${data.products_not_linked} product names not linked to the product master (sales still recorded).`);
+  } else {
+    showMsg(`Imported ${data.lines} lines: ${data.passed} posted, ${data.held} on hold.`, data.held > 0);
+    $('#result').innerHTML = (data.unlinked_items && data.unlinked_items.length
+      ? `<li class="error">${data.unlinked_items.length} ACE item name(s) need linking — see below.</li>` : '');
+  }
+  $('#file').value = ''; ROWS = []; ACE = null; $('#preview').innerHTML = '';
+  loadLinks(); loadHolds();
+}
+
+const sim = (a, b) => {               // word-overlap score for suggestions
+  const w = s => new Set(norm(s).split(' ').filter(x => x.length > 2));
+  const A = w(a), B = w(b); let n = 0; A.forEach(x => { if ([...B].some(y => y.startsWith(x) || x.startsWith(y))) n++; });
+  return n / Math.max(1, Math.min(A.size, B.size));
+};
+async function loadLinks() {
+  const { data, error } = await sb.rpc('unlinked_ace_items');
+  if (error) { $('#linkCard').classList.add('hidden'); return; }
+  if (!MATS.length) MATS = (await sb.from('material').select('id,code,name,unit').order('name')).data || [];
+  $('#links tbody').innerHTML = data.length ? data.map((it, i) => {
+    const ranked = MATS.map(m => ({ m, s: sim(it.ace_name, m.name) })).sort((a, b) => b.s - a.s);
+    const best = ranked[0] && ranked[0].s >= 0.5 ? ranked[0].m.id : '';
+    return `<tr><td>${esc(it.ace_name)}<br><span class="muted">${esc(it.doc_types)}${it.last_rate ? ' · ₹' + it.last_rate : ''}</span></td><td>${it.lines}</td>
+      <td><select id="lm${i}"><option value="">—</option>${ranked.map(({ m }) => `<option value="${m.id}" ${m.id === best ? 'selected' : ''}>${esc(m.name)} (${esc(m.unit)})</option>`).join('')}</select></td>
+      <td><select id="lu${i}"><option value="">—</option><option>kg</option><option>L</option><option>pcs</option><option>g</option><option>pkt</option><option>box</option></select></td>
+      <td><button onclick="linkItem(${i})">Link</button></td></tr>`;
+  }).join('') : '<tr><td colspan="5" class="muted">All ACE items are linked.</td></tr>';
+  window.__links = data;
+}
+async function linkItem(i) {
+  const it = window.__links[i], mat = $('#lm' + i).value, unit = $('#lu' + i).value;
+  if (!mat && !unit) return showMsg('Pick a material, or a unit to create a new one.', true);
+  const { data, error } = await sb.rpc('link_ace_item', { p_ace_name: it.ace_name,
+    p_material_id: mat && !unit ? Number(mat) : null, p_new_unit: unit || null });
+  if (error) return showMsg(error.message, true);
+  showMsg(`Linked "${it.ace_name}" — ${data.lines_linked} line(s) released.`);
+  MATS = []; loadLinks(); loadHolds();
+}
+
+async function loadHolds() {
+  const { data, error } = await sb.rpc('open_holds');
+  if (error) { $('#holdsCard').innerHTML = '<p class="muted">You cannot review holds.</p>'; return; }
+  $('#holds tbody').innerHTML = data.length ? data.map(h => `<tr>
+    <td>${esc(h.business_date)}<br><span class="muted">${esc(h.file || '#' + h.upload_id)} · ${esc(h.register_type)}</span></td>
+    <td>${esc(h.line)}<br><span class="muted">${esc(h.voucher_no || '')}</span></td>
+    <td>${esc(h.material || '')}</td>
+    <td>${h.qty ?? '—'} ${esc(h.unit || '')} × ${h.rate ?? '—'} = ${h.value ?? '—'}</td>
+    <td>${esc(h.gate)}</td>
+    <td>${esc(h.reason)}<br><span class="muted">${esc(h.fix || '')}</span></td>
+    <td>${h.can_accept ? `<button onclick="resolve(${h.hold_id},'accept')">Accept</button>` : ''}
+        <button class="secondary" onclick="resolve(${h.hold_id},'reject')">Reject</button></td></tr>`).join('')
+    : '<tr><td colspan="7" class="muted">Nothing on hold.</td></tr>';
+}
+
+async function resolve(id, action) {
+  const note = prompt(action === 'accept' ? 'Why is this line OK? (optional)' : 'Why reject?');
+  if (note === null) return;
+  const { error } = await sb.rpc('resolve_hold', { p_hold_id: id, p_action: action, p_note: note || null });
+  if (error) return showMsg(error.message, true);
+  showMsg(action === 'accept' ? 'Accepted' : 'Rejected'); loadHolds();
+}
+
+(async () => {
+  await requireLogin();
+  $('#bdate').value = today();
+  const { data: forms } = await sb.rpc('my_forms');
+  if (!(forms || []).some(f => f.form_type === 'register_import')) $('#uploadCard').classList.add('hidden');
+  loadLinks(); loadHolds();
+})();
+</script>
+</main></body></html>

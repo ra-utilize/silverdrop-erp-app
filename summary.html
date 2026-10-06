@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Owner Summary — Silver Drop ERP</title>
+<link rel="stylesheet" href="css.css">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="js/config.js"></script>
+<script src="js/app.js"></script>
+</head>
+<body><main>
+<header><h1><a href="index.html">Silver Drop ERP</a> · Owner Summary</h1><button class="secondary" onclick="logout()">Log out</button></header>
+<section class="card">
+  <div class="row">
+    <div><label>Business date</label><input id="bdate" type="date" onchange="load()"></div>
+    <div><button id="closeBtn" onclick="closeDay()">Close day</button> <button id="reopenBtn" class="secondary" onclick="reopenDay()">Reopen</button></div>
+  </div>
+  <div id="msg" class="msg"></div>
+</section>
+<section class="card"><h2>Forms</h2><div class="tablewrap"><table id="forms"><thead><tr><th>Form</th><th>Status</th><th>By</th><th>At</th><th></th></tr></thead><tbody></tbody></table></div></section>
+<section class="card"><h2>Store breaks</h2><div class="tablewrap"><table id="breaks"><thead><tr><th>Material</th><th>Expected</th><th>Counted</th><th>Break</th><th>Note</th></tr></thead><tbody></tbody></table></div></section>
+<section class="card"><h2>Lines that didn't balance</h2><div class="tablewrap"><table id="unbal"><thead><tr><th>Form</th><th>Item</th><th>Diff</th><th>Explanation</th><th>Note</th></tr></thead><tbody></tbody></table></div></section>
+<section class="card"><h2>Register</h2><div id="reg"></div></section>
+<section class="card"><h2>Food cost</h2><p class="muted">Daily food cost needs product → recipe links and unit weights. Recipe costs: <a href="costing.html">Recipe costing →</a></p></section>
+<script>
+const today = () => new Date(Date.now() + 5.5*3600e3).toISOString().slice(0,10);
+const fmtT = t => t ? new Date(t).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short' }) : '';
+const empty = n => `<tr><td colspan="${n}" class="muted">None</td></tr>`;
+
+async function load() {
+  await requireLogin();
+  const d = $('#bdate').value;
+  const { data, error } = await sb.rpc('owner_summary_full', { p_date: d });
+  if (error) return showMsg(error.message, true);
+  showMsg(data.day_closed ? 'Day closed.' : data.all_submitted ? 'All forms in — ready to close.' : 'Waiting for forms.', !data.all_submitted && !data.day_closed);
+  $('#closeBtn').disabled = data.day_closed; $('#reopenBtn').disabled = !data.day_closed;
+  $('#forms tbody').innerHTML = data.forms.map(f => `<tr><td>${esc(f.label)}</td>
+    <td class="${f.status === 'missing' ? 'bad' : 'good'}">${esc(f.status)}</td><td>${esc(f.submitted_by || '')}</td><td>${fmtT(f.submitted_at)}</td>
+    <td>${['submitted'].includes(f.status) ? `<button class="secondary" onclick="returnForm('${esc(f.form_type)}')">Return</button>` : ''}</td></tr>`).join('');
+  $('#breaks tbody').innerHTML = data.store_breaks.length ? data.store_breaks.map(b => `<tr>
+    <td>${esc(b.material)}</td><td>${b.expected} ${esc(b.unit)}</td><td>${b.counted}</td>
+    <td class="${b.exceeds_tolerance ? 'bad' : ''}">${b.break}</td><td>${esc(b.note || '')}</td></tr>`).join('') : empty(5);
+  $('#unbal tbody').innerHTML = data.unbalanced_lines.length ? data.unbalanced_lines.map(u => `<tr>
+    <td>${esc(u.form)}</td><td>${esc(u.product)}</td><td>${u.diff} ${esc(u.unit)}</td><td>${esc(u.explanation || '')}</td><td>${esc(u.note || '')}</td></tr>`).join('') : empty(5);
+  $('#reg').innerHTML = (data.register_uploads.length ? data.register_uploads.map(u => `<p>${esc(u.type)} · ${esc(u.file || '#' + u.id)}: ${u.lines} lines, <span class="${u.held ? 'bad' : 'good'}">${u.held} on hold</span></p>`).join('') : '<p class="muted">No register uploaded for this date.</p>')
+    + `<p>${data.open_holds_total} line(s) on hold in total. <a href="register.html">Review →</a></p>`;
+}
+async function closeDay() {
+  let { error } = await sb.rpc('close_day', { p_date: $('#bdate').value });
+  if (error && /Not all forms/.test(error.message) && confirm(error.message + '\n\nClose anyway?'))
+    ({ error } = await sb.rpc('close_day', { p_date: $('#bdate').value, p_force: true }));
+  if (error) return showMsg(error.message, true);
+  load();
+}
+async function reopenDay() {
+  const { error } = await sb.rpc('reopen_day', { p_date: $('#bdate').value });
+  if (error) return showMsg(error.message, true);
+  load();
+}
+async function returnForm(t) {
+  const reason = prompt('Why is this form being sent back?');
+  if (!reason) return;
+  const { error } = await sb.rpc('return_form', { p_date: $('#bdate').value, p_form_type: t, p_reason: reason });
+  if (error) return showMsg(error.message, true);
+  load();
+}
+$('#bdate').value = today();
+load();
+</script>
+</main></body></html>

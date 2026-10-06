@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Store Count — Silver Drop ERP</title>
+<link rel="stylesheet" href="css.css">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="js/config.js"></script>
+<script src="js/app.js"></script>
+</head>
+<body><main>
+<header><h1><a href="index.html">Silver Drop ERP</a> · Store Count</h1><button class="secondary" onclick="logout()">Log out</button></header>
+<section class="card">
+  <div class="row">
+    <div><label>Business date</label><input id="bdate" type="date" onchange="load()"></div>
+    <div><label>Your name</label><input id="who"></div>
+  </div>
+  <p id="state" class="muted"></p>
+</section>
+<section class="card">
+  <p class="muted">Expected = last count + purchases landed − register issues. Break = counted − expected.</p>
+  <div class="tablewrap"><table id="items"><thead><tr>
+    <th>Material</th><th>Last count</th><th>Register issue</th><th>Purchases landed</th><th>Counted now</th><th>Break</th><th>Tolerance</th><th>Note</th></tr></thead><tbody></tbody></table></div>
+  <p><button id="submitBtn" onclick="submitCount()">Submit count</button></p>
+  <div id="msg" class="msg"></div>
+  <ul id="errors" class="msg error"></ul>
+</section>
+<script>
+let ITEMS = [];
+const today = () => new Date(Date.now() + 5.5*3600e3).toISOString().slice(0,10);
+
+async function load() {
+  await requireLogin();
+  $('#errors').innerHTML = ''; showMsg('');
+  const { data, error } = await sb.rpc('store_count_template', { p_date: $('#bdate').value });
+  if (error) return showMsg(error.message, true);
+  ITEMS = data.items;
+  $('#state').textContent = data.day_closed ? 'Day is closed — read only.' : 'You can re-submit until the day is closed.';
+  $('#submitBtn').disabled = data.day_closed;
+  $('#items tbody').innerHTML = ITEMS.map((it, i) => `<tr>
+    <td>${esc(it.name)}<br><span class="muted">${esc(it.unit)}</span></td>
+    <td>${it.opening ?? '<span class="muted">first count</span>'}</td>
+    <td>${it.register_issue}</td>
+    <td><input type="number" step="any" inputmode="decimal" id="p${i}" value="${it.purchases_landed ?? ''}" oninput="calc(${i})"></td>
+    <td><input type="number" step="any" inputmode="decimal" id="c${i}" value="${it.evening_count ?? ''}" oninput="calc(${i})"></td>
+    <td id="b${i}"></td>
+    <td class="muted">${it.tolerance ?? '—'} ${esc(it.tolerance_type || '')}</td>
+    <td><input id="n${i}" value="${esc(it.break_note || '')}"></td></tr>`).join('');
+  ITEMS.forEach((_, i) => calc(i));
+}
+
+function calc(i) {
+  const it = ITEMS[i], c = $('#c'+i).value, el = $('#b'+i);
+  if (c === '' || it.opening == null) { el.textContent = ''; return; }
+  const expected = Number(it.opening) + Number($('#p'+i).value || 0) - Number(it.register_issue);
+  const br = Number(c) - expected;
+  const lim = it.tolerance == null ? 0 : it.tolerance_type === '%' ? Math.abs(expected) * it.tolerance / 100 : Number(it.tolerance);
+  el.textContent = (br > 0 ? '+' : '') + br.toFixed(3);
+  el.className = Math.abs(br) > lim ? 'bad' : 'good';
+}
+
+async function submitCount() {
+  $('#errors').innerHTML = '';
+  const items = ITEMS.map((it, i) => ({ material_code: it.material_code,
+      evening_count: $('#c'+i).value === '' ? null : Number($('#c'+i).value),
+      purchases_landed: Number($('#p'+i).value || 0), break_note: $('#n'+i).value || null }));
+  const { data, error } = await sb.rpc('submit_store_count', { p_date: $('#bdate').value, p_items: items, p_submitted_by: $('#who').value || null });
+  if (error) return showMsg(error.message, true);
+  if (data.status === 'rejected') {
+    showMsg('Not saved — fix these:', true);
+    $('#errors').innerHTML = data.errors.map(e => `<li>${esc(e.material_code)}: ${esc(e.error)}</li>`).join('');
+    return;
+  }
+  const over = data.results.filter(r => r.exceeds_tolerance).length;
+  showMsg(`Saved ✓ ${over ? over + ' item(s) outside tolerance — add a note.' : 'All within tolerance.'}`);
+  load();
+}
+$('#bdate').value = today();
+load();
+</script>
+</main></body></html>

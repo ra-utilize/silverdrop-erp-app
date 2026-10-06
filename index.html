@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Silver Drop ERP</title>
+<link rel="stylesheet" href="css.css">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="js/config.js"></script>
+<script src="js/app.js"></script>
+</head>
+<body><main>
+<header><h1>Silver Drop ERP</h1><button id="logoutBtn" class="secondary hidden" onclick="logout()">Log out</button></header>
+
+<section id="loginCard" class="card hidden">
+  <h2>Log in</h2>
+  <form id="loginForm">
+    <label for="email">Email</label><input id="email" type="email" autocomplete="username" required>
+    <label for="password">Password</label><input id="password" type="password" autocomplete="current-password" required>
+    <p><button type="submit">Log in</button></p>
+  </form>
+  <p class="muted">No account? Ask the owner to add you.</p>
+  <div id="msg" class="msg"></div>
+</section>
+
+<section id="homeCard" class="card hidden">
+  <h2 id="hello"></h2>
+  <div id="roles"></div>
+  <div id="formsBox" style="margin-top:12px"></div>
+  <p id="ownerLinks" class="hidden"><a href="summary.html">Owner summary →</a> &nbsp; <a href="register.html">Register holds →</a> &nbsp; <a href="costing.html">Recipe costing →</a> &nbsp; <a href="admin.html">Manage users &amp; permissions →</a></p>
+  <h2 style="margin-top:16px">What you can access</h2>
+  <div class="tablewrap"><table id="perms"><thead><tr><th>Table</th><th>Read</th><th>Add</th><th>Edit</th><th>Delete</th><th>Scope</th></tr></thead><tbody></tbody></table></div>
+</section>
+
+<script>
+async function render() {
+  const { data: { session } } = await sb.auth.getSession();
+  if (!session) { $('#loginCard').classList.remove('hidden'); return; }
+  $('#logoutBtn').classList.remove('hidden');
+  $('#homeCard').classList.remove('hidden');
+  $('#hello').textContent = 'Logged in as ' + session.user.email;
+  try {
+    const a = await myAccess();
+    $('#roles').innerHTML = a.roles.length
+      ? 'Roles: ' + a.roles.map(r => esc(r.role) + (r.department ? ' (' + esc(r.department) + ')' : '')).join(', ')
+      : '<span class="msg error">No role assigned yet — ask the owner.</span>';
+    const { data: forms } = await sb.rpc('my_forms');
+    if (forms && forms.length) {
+      $('#formsBox').innerHTML = '<h2>Daily forms</h2>' + forms.map(f =>
+        `<p><a href="${f.form_type === 'store_count' ? 'store-count.html' : f.form_type === 'register_import' ? 'register.html' : 'form.html?type=' + encodeURIComponent(f.form_type)}">${esc(f.label)} →</a></p>`).join('');
+    }
+    if (a.is_owner) {
+      $('#ownerLinks').classList.remove('hidden');
+      $('#perms').closest('.tablewrap').innerHTML = '<p>Owner: full access to every table.</p>';
+      return;
+    }
+    const yn = b => b ? '✓' : '';
+    $('#perms tbody').innerHTML = a.permissions.map(p =>
+      `<tr><td>${esc(p.table)}</td><td>${yn(p.read)}</td><td>${yn(p.insert)}</td><td>${yn(p.update)}</td><td>${yn(p.delete)}</td><td>${esc(p.scope)}</td></tr>`).join('');
+  } catch (e) {
+    $('#roles').innerHTML = '<span class="msg error">' + esc(e.message) + '</span>';
+  }
+}
+
+$('#loginForm').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const { error } = await sb.auth.signInWithPassword({ email: $('#email').value, password: $('#password').value });
+  if (error) return showMsg(error.message, true);
+  location.reload();
+});
+render();
+</script>
+</main></body></html>
